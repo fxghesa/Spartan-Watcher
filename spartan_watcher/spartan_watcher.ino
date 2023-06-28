@@ -19,10 +19,15 @@
 #include <Firebase_ESP_Client.h>
 //Provide the token generation process info.
 #include <addons/TokenHelper.h>
+#include <ArduinoJson.h>
 
 //Replace with your network credentials
-const char* ssid = "Brawijaya";
-const char* password = "ujungberung";
+// const char* ssid = "Brawijaya";
+// const char* password = "ujungberung";
+const char* ssid = "Sandy Asmara";
+const char* password = "sandydimas17";
+
+#define FIREBASE_PROJECT_ID "apps-2ee38"
 
 // Insert Firebase project API Key
 #define API_KEY "AIzaSyBbOZqg19S67nkfzis-7SXGvaQzN_GPGks"
@@ -33,15 +38,110 @@ const char* password = "ujungberung";
 
 // Insert Firebase storage bucket ID e.g bucket-name.appspot.com
 #define STORAGE_BUCKET_ID "apps-2ee38.appspot.com"
+//Define Firebase Data objects
+FirebaseData fbdo;
+FirebaseAuth auth;
+FirebaseConfig configF;
 
+#pragma region Global Variable
+void(* resetFunc) (void) = 0;
+bool qcMode = true;
+int currentTime = 0; // can be minute or hour or day
+//"2023-02-26T17:00:00.00000Z"; // ISO 8601/RFC3339 UTC "Zulu" format
+int itemCode = 0;
+String currentDate = "2023-03-01T00:00:00.00000Z";
+int errorCount = 0;
+#pragma endregion
+
+String getTimeStampNow() {
+  unsigned long randTime = millis();
+  String serverTimePath = qcMode ? "SERVERTIMEQC/ServerTimeWatcher" : "SERVERTIME/ServerTimeWatcher";
+  FirebaseJson content;
+  content.set("fields/CreateBy/stringValue", String(randTime).c_str());
+  content.set("fields/LastGet/timestampValue", String(currentDate).c_str());
+  if (Firebase.Firestore.patchDocument(&fbdo, FIREBASE_PROJECT_ID, "", serverTimePath.c_str(), content.raw(), "CreateBy,LastGet")) {
+    if (Firebase.Firestore.getDocument(&fbdo, FIREBASE_PROJECT_ID, "", serverTimePath.c_str())) {
+      // Serial.printf("ok\n%s\n\n", fbdo.payload().c_str());
+      DynamicJsonDocument doc(500);
+      DeserializationError error = deserializeJson(doc, fbdo.payload().c_str());
+      if (error) {
+        Serial.println("[error] deserializeJson() failed: ");
+        Serial.println(error.f_str());
+        resetIfOverfailed();
+        return "";
+      }
+      const char* timeResult = doc["updateTime"];
+      String date = convertDateTime(timeResult);
+      return date;
+    } else {
+      Serial.println("[error] get server time failed!");
+      Serial.println(fbdo.errorReason());
+      resetIfOverfailed();
+      return "";
+    }
+  } else {
+    Serial.println("[error] set server time failed!");
+    Serial.println(fbdo.errorReason());
+    Serial.printf("[error] input used: ");
+    Serial.printf(String(randTime).c_str());
+    Serial.printf("\n");
+    Serial.printf(String(currentDate).c_str());
+    Serial.printf("\n");
+    resetIfOverfailed();
+    return "";
+  }
+}
+
+String convertDateTime(const char* date) {
+  //https://arduino.stackexchange.com/questions/83860/esp8266-iso-8601-string-to-tm-struct
+  struct tm tm = {0};
+  char buf[100];
+  // Convert to tm struct
+  strptime(date, "%Y-%m-%dT%H:%M:%S", &tm);
+  // Can convert to any other format
+  // strftime(buf, sizeof(buf), "%d %b %Y %H:%M", &tm); //original
+  strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
+  // Serial.printf("%s", buf);
+  return String(buf);
+}
+
+int getSpecificTime(const char* date, char type) {
+  struct tm tm = {0};
+  char buf[100];
+  strptime(date, "%Y-%m-%dT%H:%M:%S", &tm);
+  switch (type) {
+    case 'y':
+      return tm.tm_year;
+    case 'm':
+      return tm.tm_mon;
+    case 'd':
+      return tm.tm_mday;
+    case 'h':
+      return tm.tm_hour;
+    case 'M':
+      return tm.tm_min;
+    default:
+      return 0;
+  }
+}
+
+void resetIfOverfailed() {
+  errorCount++;
+  if (errorCount >= 4) {
+    Serial.println("[info] resetting device ...");
+    resetFunc();
+  }
+}
+
+#pragma region Image capture
 // Photo File Name to save in SPIFFS
 int i = 1;
-#define FILE_PHOTO "/camqc/capture.jpg"
-#define FILE_PHOTO1 "/camqc/capture1.jpg"
-#define FILE_PHOTO2 "/camqc/capture2.jpg"
-#define FILE_PHOTO3 "/camqc/capture3.jpg"
-#define FILE_PHOTO4 "/camqc/capture4.jpg"
-#define FILE_PHOTO5 "/camqc/capture5.jpg"
+#define FILE_PHOTO "/capture.jpg"
+#define FILE_PHOTO1 "/capture1.jpg"
+#define FILE_PHOTO2 "/capture2.jpg"
+#define FILE_PHOTO3 "/capture3.jpg"
+#define FILE_PHOTO4 "/capture4.jpg"
+#define FILE_PHOTO5 "/capture5.jpg"
 
 // OV2640 camera module pins (CAMERA_MODEL_AI_THINKER)
 #define PWDN_GPIO_NUM     32
@@ -62,12 +162,6 @@ int i = 1;
 #define PCLK_GPIO_NUM     22
 
 boolean takeNewPhoto = true;
-
-//Define Firebase Data objects
-FirebaseData fbdo;
-FirebaseAuth auth;
-FirebaseConfig configF;
-
 bool taskCompleted = false;
 
 String fileName() {
@@ -197,6 +291,7 @@ void initCamera(){
     ESP.restart();
   } 
 }
+#pragma endregion
 
 void setup() {
   // Serial port for debugging purposes
@@ -223,30 +318,43 @@ void setup() {
 void loop() {
   if (takeNewPhoto) {
     capturePhotoSaveSpiffs();
-    if (i == 3) {
+    if (i == 2) {
       takeNewPhoto = false;
     }
     // takeNewPhoto = false;
   }
   delay(1);
   if (Firebase.ready() && !taskCompleted){
-    // taskCompleted = true;
-    Serial.print("Uploading picture... ");
+    String _currentDate = getTimeStampNow();
+    Serial.println(_currentDate);
+    // if (_currentDate != "") {
+      currentDate = _currentDate;
+      currentDate += currentDate.indexOf("Z") <= 0 ? "Z" : "";
+      String _directory = qcMode ? "/camqc" : "/cam";
+      _directory += "/" + String(getSpecificTime(currentDate.c_str(), 'y'));
+      _directory += "/" + String(getSpecificTime(currentDate.c_str(), 'm'));
+      _directory += "/" + String(getSpecificTime(currentDate.c_str(), 'd'));
+      _directory += "/" + String(getSpecificTime(currentDate.c_str(), 'h') + 7) + '.' + String(getSpecificTime(currentDate.c_str(), 'M')); 
+      _directory += fileName();
+      // taskCompleted = true;
+      Serial.println(_directory);
+      Serial.print("Uploading picture... ");
 
-    //MIME type should be valid to avoid the download problem.
-    //The file systems for flash and SD/SDMMC can be changed in FirebaseFS.h.
-    if (Firebase.Storage.upload(&fbdo, STORAGE_BUCKET_ID /* Firebase Storage bucket id */, fileName() /* path to local file */, mem_storage_type_flash /* memory storage type, mem_storage_type_flash and mem_storage_type_sd */, fileName() /* path of remote file stored in the bucket */, "image/jpeg" /* mime type */)){
-      Serial.printf("\nDownload URL: %s\n", fbdo.downloadURL().c_str());
-      if (i == 3) {
-        taskCompleted = true;
-        i = 1;
-      } else {
-        i++;
+      //MIME type should be valid to avoid the download problem.
+      //The file systems for flash and SD/SDMMC can be changed in FirebaseFS.h.
+      if (Firebase.Storage.upload(&fbdo, STORAGE_BUCKET_ID /* Firebase Storage bucket id */, fileName() /* path to local file */, mem_storage_type_flash /* memory storage type, mem_storage_type_flash and mem_storage_type_sd */, _directory /* path of remote file stored in the bucket */, "image/jpeg" /* mime type */)){
+        Serial.printf("\nDownload URL: %s\n", fbdo.downloadURL().c_str());
+        if (i == 2) {
+          taskCompleted = true;
+          i = 1;
+        } else {
+          i++;
+        }
       }
-    }
-    else{
-      Serial.println(fbdo.errorReason());
-    }
+      else{
+        Serial.println(fbdo.errorReason());
+      }
+    // }
   }
   delay(1000);
 }
